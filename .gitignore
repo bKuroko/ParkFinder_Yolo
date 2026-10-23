@@ -1,0 +1,10 @@
+venv/
+__pycache__/
+*.pyc
+.env
+runs/
+videos/
+dataset_frames/
+ParkFinder-Own-Car-Dataset-v2/
+*.zip
+*.pt
