@@ -1,12 +1,13 @@
 import cv2
 import json
+import os
 
 
 # =========================================
 # SETTINGS
 # =========================================
 
-VIDEO_PATH = "videos/parking.mp4"
+VIDEO_PATH = os.getenv("PARKFINDER_CAMERA_URL", "http://172.20.78.67:8080/video")
 
 FRAME_TIME_MS = 0
 # 0 = first frame

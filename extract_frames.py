@@ -1,7 +1,7 @@
 import cv2
 import os
 
-video_path = "videos/parking.mp4"
+video_path = "videos/parking3.mp4"
 output_folder = "dataset_frames"
 
 os.makedirs(output_folder, exist_ok=True)
@@ -12,7 +12,7 @@ frame_number = 0
 saved_number = 0
 
 # Save 1 frame every 15 frames
-frame_interval = 15
+frame_interval = 1
 
 while True:
     success, frame = cap.read()

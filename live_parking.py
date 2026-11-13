@@ -11,7 +11,7 @@ os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
 from main import DEFAULT_CONFIDENCE, DEFAULT_IMAGE_SIZE, run  # noqa: E402
 
 
-CAMERA_URL = "rtsp://192.168.1.39/live/ch00_0"
+CAMERA_URL = "http://172.20.78.67:8080/video"
 
 
 if __name__ == "__main__":
@@ -22,6 +22,9 @@ if __name__ == "__main__":
             confidence=DEFAULT_CONFIDENCE,
             imgsz=DEFAULT_IMAGE_SIZE,
             headless=False,
+            # Sync detected occupancy to Appwrite. Set this to True for
+            # camera-only operation without database writes.
+            offline=False,
             max_frames=0,
             output=None,
         )

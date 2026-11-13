@@ -1,10 +1,12 @@
 import argparse
 import json
+import os
 import time
 from pathlib import Path
 
 import cv2
 import numpy as np
+import requests
 from ultralytics import YOLO
 
 from parking_logic import (
@@ -15,6 +17,24 @@ from parking_logic import (
 
 
 PROJECT_DIR = Path(__file__).resolve().parent
+
+
+def load_local_env():
+    """Load simple KEY=VALUE settings without adding another dependency."""
+    env_path = PROJECT_DIR / ".env"
+    if not env_path.exists():
+        return
+
+    for line in env_path.read_text(encoding="utf-8-sig").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        value = value.strip().strip('"').strip("'")
+        os.environ.setdefault(key.strip(), value)
+
+
+load_local_env()
 
 DISPLAY_WIDTH = 1280
 DISPLAY_HEIGHT = 720
@@ -70,6 +90,12 @@ def parse_args():
         "--headless",
         action="store_true",
         help="Run without opening a video window.",
+    )
+
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="Run locally without connecting to or updating Appwrite.",
     )
 
     parser.add_argument(
@@ -132,6 +158,64 @@ def load_parking_spaces():
         )
 
     return spaces
+
+
+def send_slot_updates(slots):
+    """Send changed parking-slot states to the ParkFinder Appwrite API."""
+    api_base = os.environ["PARKFINDER_API_URL"].rstrip("/")
+    api_key = os.environ["PARKFINDER_AI_API_KEY"]
+    facility_id = int(os.environ["PARKFINDER_FACILITY_ID"])
+
+    response = requests.post(
+        f"{api_base}/ingest/slot-status",
+        headers={"X-API-Key": api_key},
+        json={
+            "facility_id": facility_id,
+            "camera_status": "online",
+            "slots": slots,
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def resolve_appwrite_slot_map(api_base, facility_id, parking_spaces):
+    """Validate camera-space names against this Appwrite facility's slots."""
+    try:
+        configured_map = json.loads(os.getenv("PARKFINDER_SLOT_MAP", "{}"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("PARKFINDER_SLOT_MAP must be valid JSON") from exc
+    if not isinstance(configured_map, dict):
+        raise RuntimeError("PARKFINDER_SLOT_MAP must be a JSON object")
+
+    response = requests.get(
+        f"{api_base.rstrip('/')}/facilities/{facility_id}",
+        timeout=30,
+    )
+    response.raise_for_status()
+    appwrite_slot_names = {
+        str(slot.get("slot_number"))
+        for slot in response.json().get("slots", [])
+        if slot.get("slot_number") is not None
+    }
+
+    mapping = {
+        str(space_id): str(configured_map.get(str(space_id), space_id))
+        for space_id in parking_spaces
+    }
+    missing = sorted(
+        appwrite_name
+        for appwrite_name in mapping.values()
+        if appwrite_name not in appwrite_slot_names
+    )
+    if missing:
+        raise RuntimeError(
+            f"Appwrite facility {facility_id} has no slots named: "
+            + ", ".join(missing)
+            + ". Set PARKFINDER_SLOT_MAP to map camera space IDs to Appwrite slot numbers."
+        )
+    return mapping
 
 
 def get_car_class_ids(model):
@@ -673,6 +757,36 @@ def run(args):
         available_after_misses=AVAILABLE_AFTER_MISSES,
     )
 
+    if args.offline:
+        slot_number_by_space = {}
+        print("Offline mode: Appwrite is disabled.")
+    else:
+        required_cloud_settings = (
+            "PARKFINDER_API_URL",
+            "PARKFINDER_AI_API_KEY",
+            "PARKFINDER_FACILITY_ID",
+        )
+        missing_cloud_settings = [
+            key for key in required_cloud_settings if not os.getenv(key)
+        ]
+        if missing_cloud_settings:
+            raise RuntimeError(
+                "Missing ParkFinder cloud settings in .env: "
+                + ", ".join(missing_cloud_settings)
+            )
+        try:
+            facility_id = int(os.environ["PARKFINDER_FACILITY_ID"])
+        except ValueError as exc:
+            raise RuntimeError("PARKFINDER_FACILITY_ID must be an integer") from exc
+        slot_number_by_space = resolve_appwrite_slot_map(
+            os.environ["PARKFINDER_API_URL"],
+            facility_id,
+            parking_spaces,
+        )
+
+    last_sent_status = {}
+    last_send_attempt = 0.0
+
     model_path = resolve_project_path(
         args.model
     )
@@ -812,6 +926,46 @@ def run(args):
                     occupied_spaces
                 )
             )
+
+            current_status = {
+                str(space_id): status == "OCCUPIED"
+                for space_id, status in parking_status.items()
+            }
+
+            confidence_by_space = {}
+            for detection, space_id, _center in assignments:
+                if space_id is not None:
+                    name = str(space_id)
+                    confidence_by_space[name] = max(
+                        confidence_by_space.get(name, 0.0),
+                        float(detection.confidence),
+                    )
+
+            changed_slots = [] if args.offline else [
+                {
+                    "slot_number": slot_number_by_space[name],
+                    "is_occupied": occupied,
+                    "confidence": confidence_by_space.get(name, 0.0),
+                }
+                for name, occupied in current_status.items()
+                if last_sent_status.get(name) != occupied
+            ]
+
+            now = time.monotonic()
+            if changed_slots and now - last_send_attempt >= 5.0:
+                last_send_attempt = now
+                try:
+                    result = send_slot_updates(changed_slots)
+                    last_sent_status = current_status.copy()
+                    print(
+                        "Appwrite updated "
+                        f"{result.get('updated_slots', 0)} slot(s)."
+                    )
+                except requests.RequestException as exc:
+                    print(
+                        "Appwrite update failed: "
+                        f"{type(exc).__name__}"
+                    )
 
             frame_count += 1
 
